@@ -1,0 +1,126 @@
+amro.atrash, salih.egbaria
+327807145, 214671489
+
+# PEPSE — Peaceful Endless Pandora Side-scrolling Environment
+
+---
+
+## What This Package Does
+
+The `pepse.world.avatar` package handles everything to do with the player
+character: movement, physics, keyboard input, animations, and energy. Instead
+of putting all of that into one big class, we split it into six classes that
+each have a clear job.
+
+- `Avatar` — the main player object; owns physics, animations, and the state
+- `AvatarState` — an interface that all three movement states implement
+- `IdleState` — behaviour when the avatar stands still
+- `RunState` — behaviour when the avatar runs left or right
+- `JumpState` — behaviour when the avatar is airborne
+- `Energy` — tracks the energy value and notifies the UI when it changes
+
+---
+
+## The State Pattern
+
+The original `Avatar.update()` was turning into a huge if/else chain trying
+to figure out whether the avatar was on the ground, moving, jumping,
+double-jumping, and so on. It was hard to read and every new feature made
+it worse.
+
+To fix this, we created an `AvatarState` interface with two methods:
+
+- `update(Avatar, float deltaTime)` — runs the state's logic, returns next state
+- `getAnimation(Avatar)` — returns the right animation for this state
+
+Each movement mode is its own class. The whole `Avatar.update()` loop is now:
+
+    currentState = currentState.update(this, deltaTime);
+    renderer().setRenderable(currentState.getAnimation(this));
+
+No if/else chains in `Avatar` at all. Each state handles its own logic and
+decides on its own when to switch to a different state.
+
+**`IdleState`** regenerates energy while the avatar is stationary. Every
+frame it checks in order: should I jump (space pressed, enough energy)?
+Did I walk off a ledge? Is a direction key held with enough energy?
+If none of those, it stops horizontal movement and stays idle.
+
+**`RunState`** drains energy per frame, sets the horizontal velocity, and
+flips the sprite to face the direction of travel. It also handles the case
+where both direction keys are pressed at once (treated as no input). It
+switches to `JumpState` on a spacebar press or if the avatar walks off a
+ledge, and back to `IdleState` if there is no input or energy runs out.
+
+**`JumpState`** handles all airborne movement. The `doubleJumpUsed` flag
+lives inside `JumpState` itself, not in `Avatar`. So when the state object
+gets thrown away on landing, the flag resets naturally with it. The double
+jump only fires when all four things are true at the same time: the avatar
+is falling downward, space was just pressed this frame, the flag is false,
+and energy is at least 50.
+
+Adding a new movement mode in the future just means writing one new class
+that implements `AvatarState`. Nothing in `Avatar` needs to change.
+
+---
+
+## Energy and the UI Callback
+
+We put the energy logic in its own class to keep `Avatar` from getting too
+cluttered. `Energy` stores the value as a float between 0 and 100, clamps
+it on every change, and calls a `Consumer<Float>` callback whenever the
+value actually changes.
+
+`PepseGameManager` registers the callback like this:
+
+    avatar.setOnEnergyChange(v -> energyLabel.setString(v.intValue() + "%"));
+
+After that, the energy display updates itself automatically. `Energy` doesn't
+know anything about the UI — it just calls its listener with the new value.
+The callback also fires immediately when it is first registered, so the
+display shows "100%" from the start without any extra setup call.
+
+The only energy-related methods that are public on `Avatar` are:
+
+- `addEnergy(float amount)` — called by `Fruit` when the player picks one up
+- `setOnEnergyChange(Consumer<Float>)` — used by `PepseGameManager` for the UI
+
+Everything else goes through the internal `Energy` object directly.
+
+---
+
+## Other Implementation Decisions
+
+### Who Can Move the Avatar
+
+`Avatar` has a lot of methods the state classes need — things like
+`setVelocityX()`, `isMovingLeft()`, `flipRenderer()`, and `getEnergy()`.
+We left all of these without an access modifier, which in Java means
+package-private. Only code in the same package (`pepse.world.avatar`) can
+call them.
+
+This means the state classes can control the avatar however they need to,
+but nothing outside the avatar package can touch those controls. Classes like
+`PepseGameManager`, `Terrain`, or `Fruit` only see the two public methods
+above and the `PLAYER_SIZE` constant.
+
+### Ground Contact — int Instead of boolean
+
+Using a boolean `isOnGround` flag breaks when the avatar stands on two ground
+tiles at once. As it crosses a tile boundary, the exit event for the first
+tile fires before the enter event for the second — so the flag briefly goes
+false and the avatar wrongly thinks it is in the air for one frame.
+
+We use an `int floorContacts` instead. It goes up on every ground or trunk
+collision enter and down on every exit. The avatar counts as grounded as long
+as `floorContacts > 0`. We also clamp it to zero in case events arrive in an
+unexpected order.
+
+### Jump Input — One Press, One Jump
+
+`isKeyPressed()` returns true for every frame the key is held down. Using it
+directly for jumps would fire a jump on every frame while holding space. We
+fix this by tracking `wasSpacePressed` (was space held last frame) and
+computing `jumpJustPressed` once at the top of each `Avatar.update()` call.
+The state classes read it through `isJumpPressed()`. No matter how many times
+a state calls it in one frame, the result is the same and nothing breaks.
